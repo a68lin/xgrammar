@@ -1,0 +1,15 @@
+name: Test scheduled tokenizer refresh
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    uses: a68lin/xgrammar/.github/workflows/refresh_tokenizer_assets.yaml@feat/scheduled-hf-bundle-cache
+    with:
+      source_ref: feat/scheduled-hf-bundle-cache
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
