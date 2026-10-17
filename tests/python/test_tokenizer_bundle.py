@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import sys
 import zipfile
 from pathlib import Path
 
@@ -137,3 +138,34 @@ def test_bundle_verifier_rejects_wrong_revision(tmp_path, manifest):
         bundle.writestr("example--pinned/config.json", "{}")
     with pytest.raises(RuntimeError, match="Pinned revision missing"):
         verifier.verify(archive, manifest, full=True)
+
+
+def test_public_cli_publishes_once_when_archive_paths_match(
+    tmp_path, manifest, snapshots, monkeypatch
+):
+    assets = script("prepare_tokenizer_assets")
+    archive = tmp_path / "public.zip"
+    outputs = tmp_path / "github-output"
+    monkeypatch.setattr(assets, "get_token", lambda: None)
+    monkeypatch.setattr(assets, "download_snapshot", lambda *args: snapshots[0])
+    monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare",
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(tmp_path / "assets"),
+            "--archive",
+            str(archive),
+            "--public-archive",
+            str(archive),
+        ],
+    )
+    assets.main()
+    assert outputs.read_text() == "changed=true\npublic_changed=true\n"
+    outputs.write_text("")
+    assets.main()
+    assert outputs.read_text() == "changed=false\npublic_changed=false\n"
