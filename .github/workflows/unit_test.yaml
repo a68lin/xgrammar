@@ -30,8 +30,9 @@ jobs:
 
   prepare_tokenizers:
     needs: [pre_check]
-    name: Restore published tokenizer assets
+    name: Prepare tokenizer assets
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -59,21 +60,35 @@ jobs:
             }}
           restore-keys: tokenizer-bundle-v2-${{ steps.mode.outputs.name }}-
 
-      - name: Require a complete published bundle
+      - name: Check cached bundle completeness
+        id: bundle
         env:
           BUNDLE_KEY: ${{ steps.assets.outputs.cache-matched-key }}
         run: |
-          if [ -z "$BUNDLE_KEY" ]; then
-            echo "::error::No tokenizer cache. Run Refresh tokenizer assets on the default branch, then rerun this workflow."
-            exit 1
-          fi
-          echo "Using tokenizer bundle: $BUNDLE_KEY"
+          FULL_FLAG=""
           if [ "${{ steps.mode.outputs.name }}" = "full" ]; then
-            python scripts/verify_tokenizer_bundle.py .ci/published/full/tokenizer-assets.zip --full
-          else
-            python scripts/verify_tokenizer_bundle.py .ci/published/public/tokenizer-assets.zip
+            FULL_FLAG="--full"
           fi
-          echo "Tokenizer cache: $BUNDLE_KEY" >> "$GITHUB_STEP_SUMMARY"
+          if python scripts/ensure_tokenizer_bundle.py .ci/published/${{ steps.mode.outputs.name }}/tokenizer-assets.zip --check $FULL_FLAG; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+            echo "Tokenizer cache: $BUNDLE_KEY" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            echo "Tokenizer cache missing/incomplete; fetching once for this run." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fetch fallback bundle once for all test jobs
+        if: steps.bundle.outputs.complete != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_DOWNLOAD_TIMEOUT: 60
+        run: |
+          python -m pip install "huggingface_hub>=1.2,<2"
+          FULL_FLAG=""
+          if [ "${{ steps.mode.outputs.name }}" = "full" ]; then
+            FULL_FLAG="--full"
+          fi
+          python scripts/ensure_tokenizer_bundle.py .ci/published/${{ steps.mode.outputs.name }}/tokenizer-assets.zip $FULL_FLAG
 
       - name: Share selected bundle with all test jobs
         uses: actions/upload-artifact@v4

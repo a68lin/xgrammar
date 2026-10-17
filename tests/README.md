@@ -37,16 +37,20 @@ Only refresh runs in the default branch's cache scope publish bundles. The optio
 merging it; it does not change that cache scope. Without `HF_TOKEN`, refresh only
 publishes public assets. Full snapshots and public subsets use distinct prefixes.
 
-The unit-test preparation job only restores the newest available matching cache;
-it does not contact the Hub or save caches. It checks that the bundle covers the PR's
-model list and explicit pins, then shares the selected ZIP with all 39 test jobs as
+The unit-test preparation job first restores the newest available matching cache.
+It checks that the bundle covers the PR's model list and explicit pins. A complete
+cache is used without contacting the Hub. If the cache is missing, corrupt or lacks
+a required model/revision, preparation downloads all required assets once using the
+same bounded retries, then verifies the new bundle. It shares one ZIP with all 39 test jobs as
 one workflow artifact. The selected cache key is recorded in the job summary. Tests
 load local paths from `index.json` with `HF_HUB_OFFLINE=1`; `XGRAMMAR_TEST_OFFLINE=1`
 also rejects socket connections during pytest. Individual jobs never fetch assets.
 
-If the cache is absent/evicted, or lacks a model newly required by a PR, preparation
-fails with recovery instructions. Run **Refresh tokenizer assets** on the default
-branch (set `source_ref` to the PR branch for a new model), then rerun unit tests.
+Fallback bundles are shared as artifacts for the current run; PRs do not publish
+shared caches or shadow the scheduled default-branch cache. Run **Refresh tokenizer
+assets** on the default branch to replenish a missing shared cache (set `source_ref`
+to the PR branch for a newly required model). Failed fallback downloads fail
+preparation rather than sending the 39 test jobs to the Hub independently.
 A new HF snapshot may change results between runs of the same source commit; the
 cache key and resolved SHAs identify the exact resources used. Scheduled refreshes
 become active only once the workflow is present on the default branch.
