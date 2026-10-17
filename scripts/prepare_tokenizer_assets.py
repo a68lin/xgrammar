@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import time
@@ -92,16 +93,53 @@ def prepare(manifest_path, output, include_token_required=False):
         model_id = entry["repo_id"]
         print("Preparing " + model_id, flush=True)
         # Serial repositories and serial file downloads avoid a download stampede.
-        snapshot = Path(download_snapshot(model_id, entry["revision"]))
+        revision = entry.get("revision", "main")
+        snapshot = Path(download_snapshot(model_id, revision))
         relative = model_id.replace("/", "--")
         destination = output / relative
         if destination.exists():
             shutil.rmtree(destination)
         # Dereference Hub cache symlinks for portable Windows/Linux/macOS artifacts.
         shutil.copytree(snapshot, destination)
-        index[model_id] = {"path": relative, "revision": entry["revision"], "commit": snapshot.name}
+        index[model_id] = {"path": relative, "revision": revision, "commit": snapshot.name}
     prepare_tiktoken_cache(output)
     (output / "index.json").write_text(json.dumps(index, indent=2) + "\n")
+
+
+def archive_fingerprint(archive):
+    """Compare file contents, ignoring ZIP timestamps and compression details."""
+    if not Path(archive).is_file():
+        return None
+    digest = hashlib.sha256()
+    with zipfile.ZipFile(archive) as bundle:
+        for name in sorted(bundle.namelist()):
+            digest.update(name.encode() + b"\0")
+            digest.update(hashlib.sha256(bundle.read(name)).digest())
+    return digest.hexdigest()
+
+
+def write_archive(root, archive, public_only=False, manifest_path=None):
+    root, archive = Path(root), Path(archive)
+    index = json.loads((root / "index.json").read_text())
+    if public_only:
+        models = json.loads(Path(manifest_path).read_text())["models"]
+        public = {entry["repo_id"] for entry in models if not entry["requires_token"]}
+        index = {model: entry for model, entry in index.items() if model in public}
+    prefixes = tuple(entry["path"] + "/" for entry in index.values())
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    old = archive_fingerprint(archive)
+    temporary = archive.with_suffix(".tmp")
+    with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for path in sorted(root.rglob("*")):
+            name = path.relative_to(root).as_posix()
+            if path.is_file() and name.startswith(prefixes):
+                bundle.write(path, name)
+            elif path.is_file() and not public_only and name.startswith("tiktoken/"):
+                bundle.write(path, name)
+        bundle.writestr("index.json", json.dumps(index, indent=2) + "\n")
+    changed = archive_fingerprint(temporary) != old
+    temporary.replace(archive)
+    return changed
 
 
 def main():
@@ -110,17 +148,24 @@ def main():
     parser.add_argument("--output", default=".ci/tokenizer-assets")
     parser.add_argument("--archive", default=".ci/tokenizer-assets.zip")
     parser.add_argument("--include-token-required", action="store_true")
+    parser.add_argument(
+        "--public-archive", help="Also export the public-only assets without secrets"
+    )
     args = parser.parse_args()
     include = args.include_token_required or bool(get_token())
     prepare(args.manifest, args.output, include)
-    root = Path(args.output)
-    archive = Path(args.archive)
-    archive.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for path in sorted(root.rglob("*")):
-            if path.is_file():
-                bundle.write(path, path.relative_to(root))
-    print("Created " + str(archive), flush=True)
+    changed = write_archive(args.output, args.archive)
+    print(f"Created {args.archive}; changed={changed}", flush=True)
+    if args.public_archive and Path(args.public_archive) != Path(args.archive):
+        public_changed = write_archive(
+            args.output, args.public_archive, public_only=True, manifest_path=args.manifest
+        )
+    else:
+        public_changed = changed
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"changed={str(changed).lower()}\n")
+            output.write(f"public_changed={str(public_changed).lower()}\n")
 
 
 if __name__ == "__main__":

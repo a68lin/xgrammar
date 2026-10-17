@@ -15,30 +15,52 @@ It caches model/option combinations for the lifetime of the test process and ret
 independent copy for each call. This avoids repeated Hub metadata requests during
 parametrized tests while keeping tokenizer mutations isolated between tests.
 
-## Offline tokenizer assets in CI
+## Scheduled tokenizer bundles and offline CI
 
-The unit-test workflow prepares tokenizer files once and distributes a portable ZIP to
-every test runner. Test jobs set `XGRAMMAR_TOKENIZER_ASSETS`, `HF_HUB_OFFLINE=1`, and
-`XGRAMMAR_TEST_OFFLINE=1`. The last setting rejects socket connections during pytest,
-so missing assets cannot silently fall back to network downloads.
+`tests/tokenizer_assets.json` lists model IDs and whether they are used only by
+`hf_token_required` tests. Ordinary entries do not pin a commit: the refresh workflow
+fetches their current Hub `main`. Only tests intentionally targeting a release keep
+an explicit `revision` (DeepSeek V4.1 and the two MiMo checkpoints).
 
-`tokenizer_assets.json` lists the model commit revisions. When adding a tokenizer to a
-test, add its pinned revision to this manifest. Use `requires_token: true` for assets
-used only by the existing `hf_token_required` tests. The bundle also seeds tiktoken's vocabulary cache from the pinned Phi-3-small snapshot.
-The public Qwen smoke test runs
-even when PR jobs have no credentials. Changing the manifest or preparation script
-invalidates the bundle cache. Credentials and model weights are not included in the ZIP.
+`refresh_tokenizer_assets.yaml` runs weekly (Monday at 06:23 UTC) or on manual dispatch.
+It downloads tokenizer/config files serially with bounded 429 retries, not model
+weights. It creates full and public-only ZIPs, recording resolved SHAs in `index.json`.
+It verifies archive integrity and required assets, then publishes changed bundles as
+`tokenizer-bundle-v2-full-<run>-<attempt>` and `tokenizer-bundle-v2-public-<run>-<attempt>`.
+File-content fingerprints avoid duplicate caches when a refresh produces identical
+files. Publishing does not depend on model tests passing; newer assets can expose
+compatibility regressions in subsequent CI runs. A failed/incomplete download never
+publishes a candidate. No update commits, PRs, or auto-merge configuration are needed.
 
-To validate locally from a fresh bundle:
+Only refresh runs in the default branch's cache scope publish bundles. The optional
+`source_ref` dispatch input lets maintainers exercise a candidate implementation before
+merging it; it does not change that cache scope. Without `HF_TOKEN`, refresh only
+publishes public assets. Full snapshots and public subsets use distinct prefixes.
+
+The unit-test preparation job only restores the newest available matching cache;
+it does not contact the Hub or save caches. It checks that the bundle covers the PR's
+model list and explicit pins, then shares the selected ZIP with all 39 test jobs as
+one workflow artifact. The selected cache key is recorded in the job summary. Tests
+load local paths from `index.json` with `HF_HUB_OFFLINE=1`; `XGRAMMAR_TEST_OFFLINE=1`
+also rejects socket connections during pytest. Individual jobs never fetch assets.
+
+If the cache is absent/evicted, or lacks a model newly required by a PR, preparation
+fails with recovery instructions. Run **Refresh tokenizer assets** on the default
+branch (set `source_ref` to the PR branch for a new model), then rerun unit tests.
+A new HF snapshot may change results between runs of the same source commit; the
+cache key and resolved SHAs identify the exact resources used. Scheduled refreshes
+become active only once the workflow is present on the default branch.
+
+To prepare and inspect a bundle locally:
 
 ```bash
 python scripts/prepare_tokenizer_assets.py
+python scripts/verify_tokenizer_bundle.py .ci/tokenizer-assets.zip
 python -m zipfile -e .ci/tokenizer-assets.zip .ci/extracted
 XGRAMMAR_TOKENIZER_ASSETS="$PWD/.ci/extracted" TIKTOKEN_CACHE_DIR="$PWD/.ci/extracted/tiktoken" \
   HF_HUB_OFFLINE=1 XGRAMMAR_TEST_OFFLINE=1 \
   python -m pytest tests/python/test_tokenizer_utils.py
 ```
 
-Without a token, preparation includes only the public smoke-test assets. With an
-authorized `HF_TOKEN`, it also includes assets for the marked tests. Normal developer
-test runs without `XGRAMMAR_TOKENIZER_ASSETS` retain the standard Hub loading behavior.
+With an authorized `HF_TOKEN`, also pass `--full` to the verification command.
+Normal developer tests without `XGRAMMAR_TOKENIZER_ASSETS` retain Hub loading.
